@@ -1,14 +1,8 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Column, Integer, String, Float, DateTime
 from datetime import datetime
-import os
+from app.database import Base  # Import Base from database.py
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db:5432/tradeshift")
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
+# Removed: engine, SessionLocal, Base definition (now in database.py)
 
 class TradeLog(Base):
     """
@@ -42,3 +36,17 @@ class TradeLog(Base):
     exit_reason = Column(String, nullable=True)
 
     time_since_last_trade = Column(Float, nullable=True)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    full_name = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+    investment_goals = Column(String, nullable=True)  # e.g., "Growth", "Value", "Day Trading"
+    risk_tolerance = Column(String, nullable=True)    # e.g., "Low", "Medium", "High"
+    preferred_industries = Column(String, nullable=True) # e.g., "Technology", "Healthcare"
+    created_at = Column(DateTime, default=datetime.utcnow)

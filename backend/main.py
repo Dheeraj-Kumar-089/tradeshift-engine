@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 from sqlalchemy import create_engine, text
 import pandas as pd
 from minio import Minio
@@ -13,6 +14,20 @@ import datetime
 from redis import Redis
 from prometheus_fastapi_instrumentator import Instrumentator
 from app.oms import OrderManager
+from app import auth
+from app.routers import inngest
+from app.models import User  # Models must be imported for Base to detect them
+from app.database import Base, connect_to_database
+
+# --- DB INITIALIZATION ---
+# Connect and Create Tables using the cached connection pattern
+try:
+    engine = connect_to_database()
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database Tables Created/Verified")
+except Exception as e:
+    print(f"❌ Database Initialization Failed: {e}")
+
 
 # --- 1. ROBUST IMPORT FOR SIMULATION ---
 try:
@@ -29,20 +44,37 @@ app = FastAPI()
 # Instrumentator (Monitoring)
 Instrumentator().instrument(app).expose(app)
 
+# Global Exception Handler for debugging 500s
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_msg = f"🔥 UNHANDLED EXCEPTION: {str(exc)}\n{traceback.format_exc()}"
+    print(error_msg)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error", "detail": str(exc)},
+    )
+
 # --- 2. SECURITY (CORS) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
+app.include_router(inngest.router)
+
 # --- 3. INFRASTRUCTURE CONNECTIONS ---
-try:
-    engine = create_engine("postgresql://user:password@db:5432/tradeshift")
-except Exception as e:
-    print(f"⚠️ DB Connection Warning: {e}")
+
+
+# --- 3. INFRASTRUCTURE CONNECTIONS ---
+# Database connection is now handled by app.database module (above)
 
 try:
     minio_client = Minio("minio:9000", "minioadmin", "minioadmin", secure=False)
@@ -55,7 +87,7 @@ except Exception:
     print("⚠️ Redis not connected")
 
 # --- 4. WEBSOCKET ENDPOINT ---
-@app.websocket("/ws/ticker")
+@app.websocket("/ws/simulation")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("🟢 Client Connected")
@@ -68,17 +100,22 @@ async def websocket_endpoint(websocket: WebSocket):
     last_tick_price = 21500.0  # Default value to prevent errors before stream starts
     
     # Data Source
-    file_path = "data/NIFTY_50_1min.parquet"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(base_dir, "data", "NIFTY_50_1min.parquet")
     iterator = None
     using_real_data = False
 
     if os.path.exists(file_path):
-        print(f"📂 Loaded: {file_path}")
-        df = pd.read_parquet(file_path)
-        df.columns = df.columns.str.lower()
-        records = df.to_dict(orient="records")
-        iterator = iter(records)
-        using_real_data = True
+        try:
+            print(f"📂 Loaded: {file_path}")
+            df = pd.read_parquet(file_path)
+            df.columns = df.columns.str.lower()
+            # Opt for iterator to save memory (avoid to_dict overhead)
+            iterator = df.itertuples(index=False)
+            using_real_data = True
+        except Exception as e:
+            print(f"⚠️ Error loading parquet: {e}. Switching to synthetic data.")
+            using_real_data = False
     else:
         print("⚠️ Parquet not found. Using Synthetic Data Generation.")
 
@@ -122,8 +159,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 continue
 
                             print(f"✅ Found {len(filtered_df)} records for {target_date}")
-                            current_records = filtered_df.to_dict(orient="records")
-                            iterator = iter(current_records)
+                            print(f"✅ Found {len(filtered_df)} records for {target_date}")
+                            # Use itertuples for filtered data too
+                            iterator = filtered_df.itertuples(index=False)
 
                         except Exception as e:
                             print(f"❌ Date filtering error: {e}")
@@ -149,11 +187,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 if using_real_data:
                     try:
                         row = next(iterator)
-                        open_p, high, low, close = row['open'], row['high'], row['low'], row['close']
-                        base_time = pd.to_datetime(row.get('date') or row.get('datetime'))
+                        # Access via attributes (itertuples)
+                        open_p, high, low, close = row.open, row.high, row.low, row.close
+                        
+                        # Handle date/datetime flexibility
+                        row_date = getattr(row, 'date', None) or getattr(row, 'datetime', None)
+                        base_time = pd.to_datetime(row_date)
                     except StopIteration:
                         print("🏁 End of Data. Restarting...")
-                        iterator = iter(records)
+                        iterator = df.itertuples(index=False)
                         continue
                 else:
                     open_p, high, low, close = 21500, 21510, 21490, 21505
@@ -195,3 +237,6 @@ async def websocket_endpoint(websocket: WebSocket):
         print("🔴 Disconnected")
     except Exception as e:
         print(f"⚠️ Error: {e}")
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

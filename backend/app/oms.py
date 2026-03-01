@@ -1,7 +1,8 @@
 # File: backend/app/oms.py
 
 from datetime import datetime
-from .models import TradeLog, SessionLocal
+from .models import TradeLog
+from .database import get_session
 
 
 class OrderManager:
@@ -64,7 +65,7 @@ class OrderManager:
             print(f"🔴 OMS: CLOSED LONG at {price} | Realized PnL: {pnl:.2f}")
 
             # 🔥 SAVE TO DATABASE
-            db = SessionLocal()
+            db = get_session()
 
             trade = TradeLog(
                 symbol="NIFTY",
