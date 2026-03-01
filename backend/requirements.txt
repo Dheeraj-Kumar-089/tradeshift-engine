@@ -1,7 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 asyncpg
-# more requirements
 redis
 minio
 pandas
@@ -16,3 +15,11 @@ vaderSentiment
 prometheus-fastapi-instrumentator
 fastapi-mail
 google-generativeai
+# Auth
+bcrypt
+PyJWT
+passlib[bcrypt]
+python-multipart
+python-jose[cryptography]
+# Workflow
+inngest
