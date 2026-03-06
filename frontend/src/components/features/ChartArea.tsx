@@ -1,19 +1,19 @@
 import { useEffect, useRef } from 'react';
-import { createChart, ColorType } from 'lightweight-charts';
+import { createChart, ColorType, CrosshairMode } from 'lightweight-charts';
 import type { ISeriesApi, UTCTimestamp } from 'lightweight-charts';
 import { useGame } from '../../hooks/useGame';
 import { useThemeStore } from '../../store/themeStore';
 
 const ChartArea = () => {
-  const { currentPrice, currentCandle, isPlaying } = useGame();
+  const { currentPrice, currentCandle, isPlaying, historicalCandles, isLoadingHistory, selectedSymbol } = useGame();
   const { theme } = useThemeStore();
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const chartRef = useRef<any | null>(null);
   const lastTimeRef = useRef<number>(0);
 
-  // Initialize Chart
+  // ── Initialize Chart ────────────────────────────────────────────────────
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -22,6 +22,23 @@ const ChartArea = () => {
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
         textColor: isDark ? '#D1D4DC' : '#131722',
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          width: 1,
+          color: isDark ? '#5c6370' : '#8e96a5',
+          style: 0, // Solid line
+          visible: true,
+          labelVisible: true,
+        },
+        horzLine: {
+          width: 1,
+          color: isDark ? '#5c6370' : '#8e96a5',
+          style: 0, // Solid line
+          visible: true,
+          labelVisible: true,
+        },
       },
       grid: {
         vertLines: { color: isDark ? '#2A2E39' : '#E0E3EB' },
@@ -33,6 +50,8 @@ const ChartArea = () => {
         timeVisible: true,
         secondsVisible: false,
         borderColor: isDark ? '#2A2E39' : '#E0E3EB',
+        fixRightEdge: false,
+        shiftVisibleRangeOnNewBar: true,
       },
       rightPriceScale: {
         borderColor: isDark ? '#2A2E39' : '#E0E3EB',
@@ -42,8 +61,8 @@ const ChartArea = () => {
     chartRef.current = chart;
 
     const series = chart.addCandlestickSeries({
-      upColor: '#089981', // TV Green
-      downColor: '#f23645', // TV Red
+      upColor: '#089981',
+      downColor: '#f23645',
       borderVisible: false,
       wickUpColor: '#089981',
       wickDownColor: '#f23645',
@@ -55,7 +74,7 @@ const ChartArea = () => {
       if (chartContainerRef.current && chartRef.current) {
         chartRef.current.applyOptions({
           width: chartContainerRef.current.clientWidth,
-          height: chartContainerRef.current.clientHeight
+          height: chartContainerRef.current.clientHeight,
         });
       }
     };
@@ -67,12 +86,16 @@ const ChartArea = () => {
     };
   }, []);
 
-  // Update Theme
+  // ── Update Theme ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current) return;
     const isDark = theme === 'dark';
     chartRef.current.applyOptions({
       layout: { textColor: isDark ? '#D1D4DC' : '#131722' },
+      crosshair: {
+        vertLine: { color: isDark ? '#5c6370' : '#8e96a5' },
+        horzLine: { color: isDark ? '#5c6370' : '#8e96a5' },
+      },
       grid: {
         vertLines: { color: isDark ? '#2A2E39' : '#E0E3EB' },
         horzLines: { color: isDark ? '#2A2E39' : '#E0E3EB' },
@@ -82,32 +105,53 @@ const ChartArea = () => {
     });
   }, [theme]);
 
-  // UPDATE CHART WITH REAL CANDLES
+  // ── Bulk-load Historical Candles whenever they change ───────────────────
+  useEffect(() => {
+    if (!seriesRef.current || historicalCandles.length === 0) return;
+
+    try {
+      const data = historicalCandles.map(c => ({
+        time: c.time as UTCTimestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+
+      seriesRef.current.setData(data);
+      lastTimeRef.current = data[data.length - 1].time as number;
+
+      // Scroll to the right to show the latest candles
+      chartRef.current?.timeScale().scrollToRealTime();
+      console.log(`📈 Chart loaded ${data.length} historical candles`);
+    } catch (err) {
+      console.error('Chart setData error:', err);
+    }
+  }, [historicalCandles]);
+
+  // ── Stream Live Candles from WebSocket ──────────────────────────────────
   useEffect(() => {
     if (!isPlaying || !seriesRef.current || !currentCandle) return;
 
     try {
-      // 1. Check for Reset (Looping from 2024 back to 2015)
+      // Detect a timeline reset (e.g. replay loop)
       if (currentCandle.time < lastTimeRef.current) {
-        console.log("↺ Timeline Reset");
-        seriesRef.current.setData([]); // Clear Chart
+        console.log('↺ Timeline Reset — clearing chart');
+        seriesRef.current.setData([]);
       }
 
-      // 2. Plot the Candle
-      // We explicitly cast to the Lightweight Charts Candle format
       const candle = {
         time: currentCandle.time as UTCTimestamp,
         open: currentCandle.open,
         high: currentCandle.high,
         low: currentCandle.low,
-        close: currentCandle.close
+        close: currentCandle.close,
       };
 
       seriesRef.current.update(candle);
       lastTimeRef.current = currentCandle.time;
-
     } catch (err) {
-      console.error("Chart Error:", err);
+      console.error('Chart update error:', err);
     }
   }, [currentCandle, isPlaying]);
 
@@ -118,12 +162,24 @@ const ChartArea = () => {
       <div className="flex items-center justify-between px-4 py-3 border-b border-tv-border transition-colors">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-lg tracking-wide text-tv-text-primary">NIFTY 50</span>
-            <span className="bg-tv-primary/10 text-tv-primary text-[10px] font-bold px-1.5 py-0.5 rounded border border-tv-primary/20">INDEX</span>
+            <span className="font-bold text-lg tracking-wide text-tv-text-primary">
+              {selectedSymbol || 'NIFTY'}
+            </span>
+            <span className="bg-tv-primary/10 text-tv-primary text-[10px] font-bold px-1.5 py-0.5 rounded border border-tv-primary/20">
+              INDEX
+            </span>
+            {isLoadingHistory && (
+              <span className="text-[10px] text-tv-text-secondary animate-pulse">Loading…</span>
+            )}
           </div>
         </div>
-        <div className={`text-xl font-mono font-bold leading-none ${currentPrice >= (currentCandle?.open ?? 0) ? 'text-[#089981]' : 'text-[#f23645]'
-          }`}>
+
+        <div
+          className={`text-xl font-mono font-bold leading-none ${currentPrice >= (currentCandle?.open ?? currentPrice)
+            ? 'text-[#089981]'
+            : 'text-[#f23645]'
+            }`}
+        >
           {currentPrice.toFixed(2)}
         </div>
       </div>

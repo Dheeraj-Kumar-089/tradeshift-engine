@@ -3,15 +3,21 @@ import { Search, ChevronDown, Plus, LayoutTemplate, Settings, Camera, BarChart2 
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { SymbolSearchModal } from '../features/SymbolSearchModal';
+import { DateSearchModal } from '../features/DateSearchModal';
+import { useGame } from '../../hooks/useGame';
+import { Calendar } from 'lucide-react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', 'D', 'W', 'M'];
 
 const TopToolbar = () => {
+    const { selectedSymbol, selectedDate } = useGame();
     const [isSearchOpen, setIsSearchOpen] = useState(false);
+    const [isDateOpen, setIsDateOpen] = useState(false);
 
     return (
         <div className="h-12 border-b border-tv-border bg-tv-bg-base flex items-center px-2 gap-1 text-tv-text-secondary select-none">
             <SymbolSearchModal open={isSearchOpen} onOpenChange={setIsSearchOpen} />
+            <DateSearchModal open={isDateOpen} onOpenChange={setIsDateOpen} />
 
             {/* Symbol Search */}
             <Button
@@ -19,10 +25,25 @@ const TopToolbar = () => {
                 className="h-8 gap-2 px-2 text-tv-text-primary hover:bg-tv-bg-pane/50"
                 onClick={() => setIsSearchOpen(true)}
             >
-                <div className="w-5 h-5 rounded-full bg-red-500 flex items-center justify-center text-[10px] text-white font-bold">N</div>
-                <span className="font-bold">NIFTY 50</span>
-                <span className="text-xs bg-tv-bg-pane px-1 rounded text-orange-400">INDEX</span>
-                <Plus size={14} />
+                <div className="w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center text-[10px] text-white font-bold">
+                    {(selectedSymbol || 'N').substring(0, 1)}
+                </div>
+                <span className="font-bold">{selectedSymbol || 'Select Symbol'}</span>
+                <span className="text-xs bg-tv-bg-pane px-1 rounded text-orange-400">EQ/IND</span>
+                <ChevronDown size={14} />
+            </Button>
+
+            <Separator orientation="vertical" className="h-6 mx-1 bg-tv-border hidden md:block" />
+
+            {/* Date Search */}
+            <Button
+                variant="ghost"
+                className="h-8 gap-2 px-2 text-tv-text-primary hover:bg-tv-bg-pane/50"
+                onClick={() => setIsDateOpen(true)}
+            >
+                <Calendar size={14} className="text-gray-400" />
+                <span className="font-bold whitespace-nowrap">{selectedDate}</span>
+                <ChevronDown size={14} />
             </Button>
 
             <Button variant="ghost" size="icon" className="md:hidden h-8 w-8" onClick={() => setIsSearchOpen(true)}>

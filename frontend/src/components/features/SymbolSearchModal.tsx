@@ -1,5 +1,4 @@
 import * as React from "react";
-
 import {
     CommandDialog,
     CommandEmpty,
@@ -11,6 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
+import { useGame } from "../../hooks/useGame"; // Added to hook into the Game context
 
 export function SymbolSearchModal({
     open,
@@ -19,32 +19,28 @@ export function SymbolSearchModal({
     open: boolean;
     onOpenChange: (open: boolean) => void;
 }) {
+    const { setSymbol } = useGame();
     const [activeTab, setActiveTab] = React.useState("All");
 
-    const TABS = ["All", "Stocks", "Forex", "Crypto", "Indices", "Futures", "Bonds", "Economy"];
+    const TABS = ["All", "Indices", "Stocks"];
 
-    const MOCK_DATA = [
-        { symbol: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", type: "Index", category: "Indices" },
-        { symbol: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", type: "Index", category: "Indices" },
-        { symbol: "RELIANCE", name: "Reliance Industries Ltd", exchange: "NSE", type: "Stock", category: "Stocks" },
-        { symbol: "TCS", name: "Tata Consultancy Services", exchange: "NSE", type: "Stock", category: "Stocks" },
-        { symbol: "HDFCBANK", name: "HDFC Bank Ltd", exchange: "NSE", type: "Stock", category: "Stocks" },
-        { symbol: "BTCUSD", name: "Bitcoin / U.S. Dollar", exchange: "BINANCE", type: "Crypto", category: "Crypto" },
-        { symbol: "ETHUSD", name: "Ethereum / U.S. Dollar", exchange: "COINBASE", type: "Crypto", category: "Crypto" },
-        { symbol: "XAUUSD", name: "Gold Spot / U.S. Dollar", exchange: "OANDA", type: "CFD", category: "Forex" },
-        { symbol: "US30", name: "Wall Street 30", exchange: "TVC", type: "CFD", category: "Indices" },
-        { symbol: "EURUSD", name: "Euro / U.S. Dollar", exchange: "FXCM", type: "Forex", category: "Forex" },
+    const EQUITIES_AND_OPTIONS = [
+        { symbol: "NIFTY", name: "Nifty 50 Index", exchange: "NSE", type: "Index", category: "Indices", token: "26000" },
+        { symbol: "BANKNIFTY", name: "Nifty Bank Index", exchange: "NSE", type: "Index", category: "Indices", token: "26009" },
+        { symbol: "SENSEX", name: "BSE Sensex Index", exchange: "BSE", type: "Index", category: "Indices", token: "1" },
+        { symbol: "HDFCBANK", name: "HDFC Bank Ltd", exchange: "NSE", type: "Stock", category: "Stocks", token: "1333" },
+        { symbol: "RELIANCE", name: "Reliance Industries Ltd", exchange: "NSE", type: "Stock", category: "Stocks", token: "2885" },
     ];
 
     const filteredData = activeTab === "All"
-        ? MOCK_DATA
-        : MOCK_DATA.filter(item => item.category === activeTab);
+        ? EQUITIES_AND_OPTIONS
+        : EQUITIES_AND_OPTIONS.filter(item => item.category === activeTab);
 
     return (
         <CommandDialog open={open} onOpenChange={onOpenChange}>
             <div className="flex flex-col gap-0">
                 <div className="px-4 pt-4 pb-2">
-                    <h2 className="text-lg font-semibold mb-2">Symbol Search</h2>
+                    <h2 className="text-lg font-semibold mb-2">Select Equity / Index</h2>
                     <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-none">
                         {TABS.map(tab => (
                             <Button
@@ -66,9 +62,9 @@ export function SymbolSearchModal({
                 </div>
                 <Separator />
 
-                <CommandInput placeholder="Search symbol, description, or exchange..." />
+                <CommandInput placeholder="Search symbol..." />
 
-                <CommandList className="h-[400px] max-h-[500px]">
+                <CommandList className="h-[300px] max-h-[400px]">
                     <CommandEmpty className="py-12 text-center text-sm text-muted-foreground">
                         No results found.
                     </CommandEmpty>
@@ -77,31 +73,46 @@ export function SymbolSearchModal({
                         {filteredData.map((item) => (
                             <CommandItem
                                 key={`${item.symbol}-${item.exchange}`}
+                                value={item.symbol}
                                 onSelect={() => {
-                                    // Handle selection
+                                    setSymbol(item.symbol, item.token);
                                     onOpenChange(false);
                                 }}
-                                className="flex items-center justify-between px-4 py-3 cursor-pointer aria-selected:bg-muted/50"
+                                className="p-0"
                             >
-                                <div className="flex items-center gap-3 overflow-hidden">
-                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-[10px] text-white
-                        ${item.category === 'Crypto' ? 'bg-orange-500' :
-                                            item.category === 'Forex' ? 'bg-green-600' :
-                                                item.category === 'Indices' ? 'bg-blue-600' : 'bg-indigo-600'}
-                    `}>
-                                        {item.symbol.substring(0, 1)}
+                                <div
+                                    className="flex items-center justify-between w-full px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors pointer-events-auto"
+                                    onMouseDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setSymbol(item.symbol, item.token);
+                                        onOpenChange(false);
+                                    }}
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setSymbol(item.symbol, item.token);
+                                        onOpenChange(false);
+                                    }}
+                                >
+                                    <div className="flex items-center gap-3 overflow-hidden pointer-events-none">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-[10px] text-white
+                            ${item.category === 'Indices' ? 'bg-blue-600' : 'bg-indigo-600'}
+                        `}>
+                                            {item.symbol.substring(0, 1)}
+                                        </div>
+                                        <div className="flex flex-col min-w-0">
+                                            <span className="font-bold text-sm truncate">{item.symbol}</span>
+                                            <span className="text-xs text-muted-foreground truncate">{item.name}</span>
+                                        </div>
                                     </div>
-                                    <div className="flex flex-col min-w-0">
-                                        <span className="font-bold text-sm truncate">{item.symbol}</span>
-                                        <span className="text-xs text-muted-foreground truncate">{item.name}</span>
-                                    </div>
-                                </div>
 
-                                <div className="flex items-center gap-3 shrink-0">
-                                    <span className="text-xs font-medium text-muted-foreground uppercase">{item.type}</span>
-                                    <Badge variant="outline" className="font-medium text-[10px] bg-secondary/50 text-secondary-foreground border-border min-w-[60px] justify-center">
-                                        {item.exchange}
-                                    </Badge>
+                                    <div className="flex items-center gap-3 shrink-0 pointer-events-none">
+                                        <span className="text-xs font-medium text-muted-foreground uppercase">{item.type}</span>
+                                        <Badge variant="outline" className="font-medium text-[10px] bg-secondary/50 text-secondary-foreground border-border min-w-[60px] justify-center">
+                                            {item.exchange}
+                                        </Badge>
+                                    </div>
                                 </div>
                             </CommandItem>
                         ))}

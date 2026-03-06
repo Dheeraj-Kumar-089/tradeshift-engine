@@ -87,15 +87,14 @@ try:
 except Exception:
     print("⚠️ Redis not connected")
 
-# --- 4. WEBSOCKET ENDPOINT ---
-@app.websocket("/ws/simulation")
 # --- 4. HELPER FUNCTION: Load Parquet by Symbol ---
-def load_parquet_for_symbol(symbol: str):
+def load_parquet_for_symbol(symbol: str, target_date: str = None):
     """
     Load Parquet file for a given symbol from the data/ directory.
     
     Args:
         symbol (str): Symbol name (e.g., 'NIFTY', 'BANKNIFTY', 'NIFTY_50')
+        target_date (str): Optional date string (e.g., '2026-03-02') to load specific date file.
         
     Returns:
         tuple: (DataFrame, file_path, symbol_name)
@@ -103,18 +102,27 @@ def load_parquet_for_symbol(symbol: str):
     Raises:
         FileNotFoundError: If no matching Parquet file is found
     """
-    # Search for files matching the pattern
-    pattern = f"data/{symbol}_*.parquet"
-    matching_files = glob.glob(pattern)
-    
-    # Try exact match first (e.g., NIFTY_50_1min.parquet for symbol "NIFTY_50")
-    pattern_exact = f"data/{symbol}.parquet"
-    exact_match = glob.glob(pattern_exact)
-    if exact_match:
-        matching_files.extend(exact_match)
+    matching_files = []
+    # Try exact match first for date format: NIFTY_2026-03-02.parquet
+    if target_date:
+        pattern_date = f"data/{symbol}_{target_date}.parquet"
+        date_match = glob.glob(pattern_date)
+        if date_match:
+            matching_files.extend(date_match)
+
+    # Search for files matching the pattern (if no date or date file not found)
+    if not matching_files:
+        pattern = f"data/{symbol}_*.parquet"
+        matching_files = glob.glob(pattern)
+        
+        # Try exact match (e.g., NIFTY_50_1min.parquet for symbol "NIFTY_50")
+        pattern_exact = f"data/{symbol}.parquet"
+        exact_match = glob.glob(pattern_exact)
+        if exact_match:
+            matching_files.extend(exact_match)
     
     if not matching_files:
-        raise FileNotFoundError(f"No Parquet file found for symbol '{symbol}' in data/ directory")
+        raise FileNotFoundError(f"No Parquet file found for symbol '{symbol}' (date: {target_date}) in data/ directory")
     
     # Sort files to get the most recent (if multiple exist)
     # Files are typically named: SYMBOL_YEAR.parquet or SYMBOL_suffix.parquet
@@ -298,130 +306,99 @@ async def get_available_symbols():
         print(f"❌ Error getting available symbols: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get symbols: {str(e)}")
 
+@app.get("/api/historical/{symbol}")
+async def get_historical_candles(symbol: str, limit: int = 500, date: str = None):
+    """
+    Return historical OHLC candles for a given symbol from its Parquet file.
+     Optionally filtered by a specific YYYY-MM-DD date.
+
+    Args:
+        symbol: Symbol name (e.g. 'NIFTY', 'BANKNIFTY')
+        limit:  Max candles to return (default 500, most recent)
+
+    Returns:
+        JSON list of {time, open, high, low, close} objects
+    """
+    try:
+        df, _, _ = load_parquet_for_symbol(symbol, date)
+
+        # Resolve the datetime column
+        time_col = next((c for c in ['datetime', 'date', 'time'] if c in df.columns), None)
+        if time_col is None:
+            raise HTTPException(status_code=422, detail="No datetime column found in data")
+
+        # Only parse if it's not already datetime type
+        if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+            df[time_col] = pd.to_datetime(
+                df[time_col].astype(str).str.replace('Ok ', '', regex=False).str.strip(), 
+                dayfirst=False, errors='coerce'
+            )
+        
+        df = df.dropna(subset=[time_col])
+        df = df.sort_values(time_col)
+
+        # Filter by date if provided
+        if date:
+            target_dt = pd.to_datetime(date).date()
+            df = df[df[time_col].dt.date == target_dt]
+
+        # Take the most recent `limit` candles
+        df = df.tail(limit)
+
+        candles = []
+        for _, row in df.iterrows():
+            ts = int(row[time_col].timestamp()) + 19800  # shift to IST
+            candles.append({
+                "time": ts,
+                "open":  float(row["open"]),
+                "high":  float(row["high"]),
+                "low":   float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        return {"symbol": symbol, "candles": candles}
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error fetching historical data for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
+
 # --- 6. WEBSOCKET ENDPOINT ---
 @app.websocket("/ws/ticker")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("🟢 Client Connected")
 
-    # Internal State
-    is_running = False
-    speed = 1.0
-    synthesizer = TickSynthesizer()
-    oms = OrderManager()
-    last_tick_price = 21500.0  # Default value to prevent errors before stream starts
-    
-    # Data Source
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(base_dir, "data", "NIFTY_50_1min.parquet")
-    # Data Source (now loaded dynamically based on symbol)
-    df = None
-    iterator = None
-    current_symbol = None
-    using_real_data = False
-
-    if os.path.exists(file_path):
-        try:
-            print(f"📂 Loaded: {file_path}")
-            df = pd.read_parquet(file_path)
-            df.columns = df.columns.str.lower()
-            # Opt for iterator to save memory (avoid to_dict overhead)
-            iterator = df.itertuples(index=False)
-            using_real_data = True
-        except Exception as e:
-            print(f"⚠️ Error loading parquet: {e}. Switching to synthetic data.")
-            using_real_data = False
-    else:
-        print("⚠️ Parquet not found. Using Synthetic Data Generation.")
+    # State
+    is_running      = False
+    speed           = 1.0
+    synthesizer     = TickSynthesizer()
+    oms             = OrderManager()
+    last_tick_price = 21500.0
+    iterator        = None
+    current_symbol  = "NIFTY"
+    df_current      = None  # keep reference for restart
 
     try:
         while True:
-            # A. CHECK FOR COMMANDS (Non-blocking)
+            # ── A. Check for incoming commands (non-blocking) ──────────────
             try:
-                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
+                data    = await asyncio.wait_for(websocket.receive_text(), timeout=0.001)
                 message = json.loads(data)
                 command = message.get("command")
-                
+
                 if command == "START":
-                    symbol = message.get("symbol")
+                    symbol      = message.get("symbol") or "NIFTY"
                     target_date = message.get("date")
-                    speed = float(message.get("speed", 1.0))
-                    
-                    if using_real_data:
-                        try:
-                            # Date Logic
-                            date_col = None
-                            if 'date' in df.columns: date_col = 'date'
-                            elif 'datetime' in df.columns: date_col = 'datetime'
-                            
-                            if not date_col:
-                                await websocket.send_json({"type": "ERROR", "message": "Dataset has no date column"})
-                                continue
+                    speed       = float(message.get("speed", 1.0))
+                    current_symbol = symbol
 
-                            # Filter DataFrame
-                            temp_df = df.copy()
-                            temp_df[date_col] = pd.to_datetime(temp_df[date_col])
-                            
-                            if not target_date:
-                                first_date = temp_df[date_col].min().date()
-                                target_date = str(first_date)
-                            
-                            target_dt = pd.to_datetime(target_date).date()
-                            mask = temp_df[date_col].dt.date == target_dt
-                            filtered_df = temp_df[mask]
-
-                            if filtered_df.empty:
-                                await websocket.send_json({"type": "ERROR", "message": f"No data found for date: {target_date}"})
-                                continue
-
-                            print(f"✅ Found {len(filtered_df)} records for {target_date}")
-                            print(f"✅ Found {len(filtered_df)} records for {target_date}")
-                            # Use itertuples for filtered data too
-                            iterator = filtered_df.itertuples(index=False)
-
-                        except Exception as e:
-                            print(f"❌ Date filtering error: {e}")
-                    # Validate symbol parameter
-                    if not symbol:
-                        await websocket.send_json({"type": "ERROR", "message": "Symbol parameter is required"})
-                        continue
-                    
-                    # Load Parquet file for the symbol
+                    # Load Parquet for the requested symbol
                     try:
-                        df, file_path, current_symbol = load_parquet_for_symbol(symbol)
-                        using_real_data = True
-                        print(f"✅ Loaded {len(df)} records from {file_path}")
-                        
-                        # Date Logic
-                        date_col = None
-                        if 'date' in df.columns: date_col = 'date'
-                        elif 'datetime' in df.columns: date_col = 'datetime'
-                        elif 'time' in df.columns: date_col = 'time'
-                        
-                        if not date_col:
-                            await websocket.send_json({"type": "ERROR", "message": "Dataset has no date/time column"})
-                            continue
-
-                        # Filter DataFrame by date if specified
-                        temp_df = df.copy()
-                        temp_df[date_col] = pd.to_datetime(temp_df[date_col])
-                        
-                        if not target_date:
-                            first_date = temp_df[date_col].min().date()
-                            target_date = str(first_date)
-                        
-                        target_dt = pd.to_datetime(target_date).date()
-                        mask = temp_df[date_col].dt.date == target_dt
-                        filtered_df = temp_df[mask]
-
-                        if filtered_df.empty:
-                            await websocket.send_json({"type": "ERROR", "message": f"No data found for date: {target_date}"})
-                            continue
-
-                        print(f"✅ Found {len(filtered_df)} records for {target_date}")
-                        current_records = filtered_df.to_dict(orient="records")
-                        iterator = iter(current_records)
-                        
+                        df_current, file_path, _ = load_parquet_for_symbol(symbol, target_date)
                     except FileNotFoundError as e:
                         await websocket.send_json({"type": "ERROR", "message": str(e)})
                         print(f"❌ {e}")
@@ -431,159 +408,150 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"❌ Data loading error: {e}")
                         continue
 
+                    print(f"✅ Loaded {len(df_current)} records from {file_path}")
+
+                    # Find the date column
+                    date_col = next(
+                        (c for c in ['datetime', 'date', 'time'] if c in df_current.columns),
+                        None
+                    )
+                    if not date_col:
+                        await websocket.send_json({"type": "ERROR", "message": "Dataset has no date/time column"})
+                        continue
+
+                    # Convert date column and filter by target_date
+                    temp_df = df_current.copy()
+                    if not pd.api.types.is_datetime64_any_dtype(temp_df[date_col]):
+                        temp_df[date_col] = pd.to_datetime(
+                            temp_df[date_col].astype(str).str.replace('Ok ', '', regex=False).str.strip(), 
+                            dayfirst=False, errors='coerce'
+                        )
+
+                    if not target_date:
+                        first_date  = temp_df[date_col].dropna().min().date()
+                        target_date = str(first_date)
+
+                    target_dt  = pd.to_datetime(target_date).date()
+                    mask       = (
+                        (temp_df[date_col].dt.date == target_dt) &
+                        (temp_df[date_col].dt.time >= datetime.time(9, 15)) &
+                        (temp_df[date_col].dt.time <= datetime.time(15, 30))
+                    )
+                    filtered_df = temp_df[mask].sort_values(by=date_col)
+
+                    if filtered_df.empty:
+                        await websocket.send_json({"type": "ERROR", "message": f"No data found for date: {target_date} in {symbol}"})
+                        continue
+
+                    print(f"✅ Streaming {len(filtered_df)} candles for {symbol} on {target_date}")
+                    # Use list-of-dicts — consistent with .get() row access below
+                    iterator   = iter(filtered_df.to_dict(orient="records"))
                     is_running = True
-                    print(f"▶️ Simulation Started (Speed: {speed}x)")
-                
-                # --- OMS INTEGRATION (The Fix) ---
+                    print(f"▶️  Simulation Started | Symbol: {symbol} | Speed: {speed}x")
+
                 elif command == "BUY":
                     oms.buy(last_tick_price, qty=50)
-                
+
                 elif command == "SELL":
                     oms.sell(last_tick_price, qty=50)
-                # ---------------------------------
+
+                elif command == "STOP":
+                    is_running = False
+                    print("⏹️ Simulation Stopped by client")
 
             except asyncio.TimeoutError:
-                pass # No command received, keep streaming
+                pass  # No command — continue streaming
 
-            # B. STREAM DATA (Only if running)
-            if is_running:
-                # 1. Get Next Candle
-                if using_real_data:
-                    try:
-                        row = next(iterator)
-                        # Access via attributes (itertuples)
-                        open_p, high, low, close = row.open, row.high, row.low, row.close
-                        
-                        # Handle date/datetime flexibility
-                        row_date = getattr(row, 'date', None) or getattr(row, 'datetime', None)
-                        base_time = pd.to_datetime(row_date)
-                    except StopIteration:
-                        print("🏁 End of Data. Restarting...")
-                        iterator = df.itertuples(index=False)
-                        continue
-                else:
-                    open_p, high, low, close = 21500, 21510, 21490, 21505
-                    base_time = datetime.datetime.now()
+            # ── B. Stream data (only when running) ────────────────────────
+            if not is_running:
+                await asyncio.sleep(0.05)
+                continue
+
+            # Get next candle row
+            try:
+                row = next(iterator)  # type: dict
+            except StopIteration:
+                print("🏁 End of data for this date — stopping.")
+                await websocket.send_json({"type": "END", "message": "Data finished for date"})
+                is_running = False
+                continue
+
+            # Extract OHLC
+            try:
+                open_p = float(row.get('open',  0))
+                high   = float(row.get('high',  0))
+                low    = float(row.get('low',   0))
+                close  = float(row.get('close', 0))
+                # Resolve timestamp from whichever date column exists
+                date_val = (
+                    row.get('datetime') or
+                    row.get('date')     or
+                    row.get('time')     or
+                    datetime.datetime.now()
+                )
+                base_time = pd.to_datetime(date_val) if not isinstance(date_val, datetime.datetime) else date_val
+            except Exception as e:
+                print(f"❌ Row parse error: {e} | Row keys: {list(row.keys())}")
+                continue
+
+            # Generate micro-ticks (Brownian bridge across the minute)
+            try:
+                ticks = synthesizer.generate_ticks(open_p, high, low, close, num_ticks=60)
+            except Exception as e:
+                print(f"❌ Synthesizer Error: {e}")
+                continue
+
+            # Stream each tick
+            for i, price in enumerate(ticks):
+                last_tick_price = float(price)
+                current_pnl     = oms.calculate_pnl(last_tick_price)
+                tick_time       = base_time + datetime.timedelta(seconds=i)
+
+                payload = {
+                    "type": "TICK",
+                    "data": {
+                        "symbol":    current_symbol,
+                        "price":     round(last_tick_price, 2),
+                        "timestamp": tick_time.isoformat(),
+                        "pnl":       round(current_pnl, 2),
+                        "volume":    int(row.get('volume', 0)),
+                    }
+                }
                 try:
-                    # 1. Get Next Candle
-                    if using_real_data:
-                        try:
-                            row = next(iterator)
-                            # print(f"Processing row: {row}") # Debug log (verbose)
-                            
-                            # Safely extract OHLC with defaults/casting
-                            try:
-                                open_p = float(row.get('open', 0))
-                                high = float(row.get('high', 0))
-                                low = float(row.get('low', 0))
-                                close = float(row.get('close', 0))
-                                date_val = row.get('date') or row.get('datetime')
-                                base_time = pd.to_datetime(date_val) if date_val else datetime.datetime.now()
-                            except Exception as e:
-                                print(f"❌ Error parsing row data: {e} | Row: {row}")
-                                continue
-
-                        except StopIteration:
-                            print("🏁 End of Data for this date.")
-                            # Stop or restart? For now, let's stop.
-                            await websocket.send_json({"type": "END", "message": "Data finished for date"})
-                            is_running = False
-                            continue
-                    else:
-                        open_p, high, low, close = 21500.0, 21510.0, 21490.0, 21505.0
-                        base_time = datetime.datetime.now()
-
-                    # 2. Generate 60 Micro-Ticks
-                    try:
-                        ticks = synthesizer.generate_ticks(open_p, high, low, close, num_ticks=60)
-                    except Exception as e:
-                         print(f"❌ Synthesizer Error: {e} | Inputs: O={open_p} H={high} L={low} C={close}")
-                         continue
-
-                    # 3. Stream Ticks
-                    for i, price in enumerate(ticks):
-                        # Construct payload
-                        payload = {
-                            "type": "TICK",
-                            "data": {
-                                "symbol": symbol if using_real_data else "MOCK_NIFTY",
-                                "price": round(price, 2),
-                                "timestamp": (base_time + datetime.timedelta(seconds=i)).isoformat(),
-                                "volume": int(row.get('volume', 0)) if using_real_data else 100
-                            }
-                        }
-                        
-                        # Check for client disconnect during streaming
-                        try:
-                            await websocket.send_json(payload)
-                        except WebSocketDisconnect:
-                            print("🔴 Client disconnected during streaming")
-                            is_running = False
-                            break
-                        except Exception as e:
-                             print(f"🔴 Send Error: {e}")
-                             is_running = False
-                             break
-
-                        # Speed Control
-                        # To make a 1-minute candle take exactly 60 seconds with 60 ticks:
-                        # 60 ticks * 1.0 sec = 60 seconds.
-                        await asyncio.sleep(1.0 / speed)
-                    
-                    # Send CANDLE message at end of minute
-                    if is_running:
-                         candle_msg = {
-                            "type": "CANDLE",
-                            "data": {
-                                "open": open_p, "high": high, "low": low, "close": close,
-                                "timestamp": base_time.isoformat()
-                            }
-                        }
-                         try:
-                            await websocket.send_json(candle_msg)
-                         except:
-                             break
-                             
-                except Exception as e:
-                    print(f"❌ Critical Loop Error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    await websocket.send_json(payload)
+                except (WebSocketDisconnect, Exception) as e:
+                    print(f"🔴 Send Error: {e}")
                     is_running = False
-                    await websocket.send_json({"type": "ERROR", "message": f"Server Error: {str(e)}"})
+                    break
 
-                # 3. Stream Loop (Batching)
-                BATCH_SIZE = 10
-                tick_batches = [ticks[i:i + BATCH_SIZE] for i in range(0, len(ticks), BATCH_SIZE)]
-                
-                for batch_index, batch_ticks in enumerate(tick_batches):
-                    if not is_running: break 
-                    
-                    batch_data = []
-                    for i, tick_price in enumerate(batch_ticks):
-                        abs_index = (batch_index * BATCH_SIZE) + i
-                        tick_time = base_time + datetime.timedelta(seconds=abs_index)
-                        
-                        # --- OMS UPDATE ---
-                        last_tick_price = float(tick_price)
-                        current_pnl = oms.calculate_pnl(last_tick_price)
-                        # ------------------
+                await asyncio.sleep(1.0 / max(speed, 0.1))
 
-                        batch_data.append({
-                            "price": round(last_tick_price, 2),
-                            "timestamp": tick_time.isoformat(),
-                            "symbol": current_symbol or "UNKNOWN",
-                            "pnl": round(current_pnl, 2)
-                        })
-                    
-                    await websocket.send_json({"type": "BATCH", "data": batch_data})
-                    await asyncio.sleep(0.1 / max(speed, 0.1))
-            else:
-                await asyncio.sleep(0.1)
+            if not is_running:
+                break
+
+            # Send CANDLE at end of each minute
+            try:
+                await websocket.send_json({
+                    "type": "CANDLE",
+                    "data": {
+                        "open":      open_p,
+                        "high":      high,
+                        "low":       low,
+                        "close":     close,
+                        "timestamp": base_time.isoformat(),
+                        "symbol":    current_symbol,
+                    }
+                })
+            except Exception:
+                break
 
     except WebSocketDisconnect:
-        print("🔴 Disconnected")
+        print("🔴 Client Disconnected")
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        print(f"⚠️ Unhandled WS Error: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
